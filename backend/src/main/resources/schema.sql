@@ -171,3 +171,98 @@ CREATE TABLE IF NOT EXISTS extension_request (
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     approved_at       TIMESTAMPTZ
 );
+
+-- ======================================================================
+-- 锂电隔离等级 · 测量一致性 / 复检配对 / 锚样校准 / 培训反馈
+-- 等级统一标准化为 1..4 序次（越高越严重）；原始取值另存 raw_* 以体现“取值混杂”。
+-- ======================================================================
+
+-- 检查员（测量主体；含仪器基准账号与一名系统性偏松检查员用于校准/培训演示）
+CREATE TABLE IF NOT EXISTS iso_inspector (
+    inspector_code VARCHAR(32) PRIMARY KEY,
+    display_name   VARCHAR(64) NOT NULL,
+    district       VARCHAR(16) NOT NULL,
+    title          VARCHAR(32),
+    active         BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+-- 场所：同场所复查的对账主体；subject_class 区分永久设施与临时施工场景
+CREATE TABLE IF NOT EXISTS iso_site (
+    site_code     VARCHAR(32) PRIMARY KEY,
+    district      VARCHAR(16) NOT NULL,
+    site_name     VARCHAR(128) NOT NULL,
+    subject_class VARCHAR(20) NOT NULL,   -- PERMANENT 永久设施 / TEMP_CONSTRUCTION 临时施工
+    latent_level  INT,                    -- 内部基准等级（播种/排名口径，不向检查员暴露）
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 观察/评定记录：一条 = 某检查员或量测方式在某观察条件下给出的一次等级
+CREATE TABLE IF NOT EXISTS iso_observation (
+    obs_id               VARCHAR(40) PRIMARY KEY,
+    field_id             VARCHAR(64) NOT NULL,
+    site_code            VARCHAR(32) REFERENCES iso_site(site_code),
+    inspector_code       VARCHAR(32) REFERENCES iso_inspector(inspector_code),
+    mode                 VARCHAR(20) NOT NULL,  -- ONSITE / REVISIT / PHOTO_BLIND / MEASURE
+    level_value          INT NOT NULL,         -- 标准化序次 1..4（越高越严重）
+    raw_value            VARCHAR(64),          -- 混杂的原始取值
+    raw_system           VARCHAR(48),          -- 原始编码体系
+    subject_class        VARCHAR(20) NOT NULL DEFAULT 'PERMANENT',
+    photo_condition_code VARCHAR(48),          -- 观察条件编码（结构化 conditions_json 的短码）
+    conditions_json      JSONB NOT NULL DEFAULT '{}', -- 光照/距离/遮挡/角度/清晰度等
+    metric_value         NUMERIC(10,2),        -- 现场量测原始数值（如实测隔离间距 m）
+    observed_at          DATE NOT NULL,
+    note                 TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_iso_obs_field ON iso_observation(field_id);
+CREATE INDEX IF NOT EXISTS idx_iso_obs_site ON iso_observation(site_code);
+CREATE INDEX IF NOT EXISTS idx_iso_obs_inspector ON iso_observation(inspector_code);
+
+-- 复检/比对配对账：显式把两条观察配成一对，pair_type 对应三类等级差比较
+CREATE TABLE IF NOT EXISTS iso_pair (
+    pair_id     VARCHAR(48) PRIMARY KEY,
+    field_id    VARCHAR(64) NOT NULL,
+    pair_type   VARCHAR(24) NOT NULL,  -- SAME_SITE_REVISIT / BLIND_PHOTO / ONSITE_VS_MEASURE
+    site_code   VARCHAR(32),
+    obs_a       VARCHAR(40) NOT NULL REFERENCES iso_observation(obs_id),
+    obs_b       VARCHAR(40) NOT NULL REFERENCES iso_observation(obs_id),
+    orientation TEXT,                  -- 有符号偏差 B-A 的业务方向说明
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_iso_pair_field_type ON iso_pair(field_id, pair_type);
+
+-- 固定锚样：带权威参考等级；anchor_class 强制区分永久设施 vs 临时施工，禁止并为同类
+CREATE TABLE IF NOT EXISTS iso_anchor_sample (
+    anchor_id       VARCHAR(40) PRIMARY KEY,
+    anchor_class    VARCHAR(20) NOT NULL,  -- PERMANENT / TEMP_CONSTRUCTION（两类不得合并锚定）
+    scenario_code   VARCHAR(48) NOT NULL,
+    scenario_name   VARCHAR(128) NOT NULL,
+    reference_level INT NOT NULL,
+    condition_code  VARCHAR(48),
+    coverage_tag    VARCHAR(64),
+    source_desc     TEXT NOT NULL,
+    active          BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+-- 锚样评分：检查员对固定锚样给出的等级
+CREATE TABLE IF NOT EXISTS iso_anchor_score (
+    anchor_id      VARCHAR(40) NOT NULL REFERENCES iso_anchor_sample(anchor_id),
+    inspector_code VARCHAR(32) NOT NULL REFERENCES iso_inspector(inspector_code),
+    given_level    INT NOT NULL,
+    scored_at      DATE NOT NULL,
+    PRIMARY KEY (anchor_id, inspector_code)
+);
+
+-- 培训反馈台：可由一致性/校准结果生成并在 OPEN -> ACKED -> DONE 间流转
+CREATE TABLE IF NOT EXISTS iso_feedback (
+    feedback_id    VARCHAR(48) PRIMARY KEY,
+    inspector_code VARCHAR(32) NOT NULL REFERENCES iso_inspector(inspector_code),
+    district       VARCHAR(16) NOT NULL,
+    topic          VARCHAR(160) NOT NULL,
+    severity       VARCHAR(12) NOT NULL,   -- HIGH / MEDIUM / LOW
+    basis_json     JSONB NOT NULL DEFAULT '{}',
+    suggestion     TEXT NOT NULL,
+    status         VARCHAR(12) NOT NULL DEFAULT 'OPEN', -- OPEN / ACKED / DONE
+    created_by     VARCHAR(64),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);

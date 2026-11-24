@@ -8,12 +8,14 @@ import QueryPage from './pages/QueryPage'
 import OfflinePage from './pages/OfflinePage'
 import HistoryPage from './pages/HistoryPage'
 import GovernancePage from './pages/GovernancePage'
+import ReliabilityPage from './pages/ReliabilityPage'
 
 const NAV = [
   { key: 'query', label: '受控查询' },
   { key: 'catalog', label: '字段目录' },
   { key: 'mapping', label: '映射契约' },
   { key: 'forms', label: '表单与证据链' },
+  { key: 'reliability', label: '隔离等级一致性' },
   { key: 'offline', label: '离线草案' },
   { key: 'history', label: '历史复现' },
   { key: 'governance', label: '新字段治理' }
@@ -64,6 +66,7 @@ export default function App() {
         {page === 'catalog' && <CatalogPage />}
         {page === 'mapping' && <MappingPage />}
         {page === 'forms' && <FormsPage />}
+        {page === 'reliability' && <ReliabilityPage />}
         {page === 'offline' && <OfflinePage />}
         {page === 'history' && <HistoryPage />}
         {page === 'governance' && <GovernancePage />}

@@ -39,8 +39,8 @@ npm run build        # 类型检查 + 生产构建（产物在 dist/）
 
 ```bash
 cd backend
-mvn test                              # JUnit：披露抑制算法、厘米→毫米换算
-python3 e2e/run-e2e.py                # 需后端已启动；7 大场景 30+ 断言的完整 E2E
+mvn test                              # JUnit：披露抑制、厘米→毫米、一致性/Kappa/闸门/分层模型
+python3 e2e/run-e2e.py                # 需后端已启动；8 大场景 86 项断言的完整 E2E
 ```
 
 ## 3. 测试账号
@@ -79,7 +79,50 @@ python3 e2e/run-e2e.py                # 需后端已启动；7 大场景 30+ 断
 8. **离线合并**：基线一致的草案 MERGED；含 `std.smoke_density`（v3 语义与敏感级均变化）的草案转 PENDING_CONFLICT，可退回重填或管理员复核强合；
 9. **新字段治理**：批准前查询 `std.ev_charge_hazard` 被拒；批准（可指定追溯生效日）后，旧表单 FI-Y-005 **不改写**，编译期回溯映射为 PRESENT。
 
-E2E 断言结果（最近一次执行）：**37 项全部 PASS，0 FAIL**（`backend/e2e/run-e2e.py`，7 大场景：标准查询 11 项、访问策略 4 项、不等价拒绝 2 项、历史复现 4 项、离线合并 6 项、扩展治理 7 项、演进一致性 3 项）。
+E2E 断言结果（最近一次在**全新重建的 PostgreSQL 库**上实际执行）：**86 项全部 PASS，0 FAIL**
+（`backend/e2e/run-e2e.py`，8 大场景：标准查询 11、访问策略 4、不等价拒绝 2、历史复现 4、离线合并 6、
+扩展治理 7、演进一致性 3、**锂电隔离一致性 49**）。后端 `mvn test`：**11 个 JUnit 用例全部通过**
+（原有 5 + 新增 `AgreementStatsTest` 6）；前端 `npm run build`（`tsc -b` 严格模式 + Vite）通过，
+`vite dev` 下所有新模块均可正常转译、`/api` 代理与登录拦截正常。
+
+> E2E 场景 1–7 中的“治理批准”按设计不可重复执行；重跑整套 E2E 前请重建库（见下文“复现方式”）。
+
+### 5.1 场景 8：锂电隔离等级测量一致性（本题新增，已实际验证）
+
+进入前端左侧 **“隔离等级一致性”** 页，或用 `city_admin` 调 `/api/reliability/*`。种子数据与标准结果：
+
+- **复检配对账**：`std.li_iso_level` 有 12 个永久场所 ×（初查/复查/盲审照片/量测）= 48 条观察、36 对配对
+  （同场所复查 / 盲审照片 / 现场量测各 12 对）；`std.li_photo_grade` 另有 18 对盲审快评。每对都计算有符号等级差 B−A。
+- **观察条件编码**：光照 / 距离 / 遮挡 / 角度 / 清晰度 + 综合 `quality=GOOD|ADVERSE`，短码如 `PH-ADV-OCCLUDED`；
+  原始取值保留 `STD_L / DISTRICT_LETTER / RISK_SCORE_100 / GAP_M / QUICK_PHOTO_4` 等混杂口径，统计前标准化到 1..4。
+- **一致性估计**：标准字段总体二次加权一致率 **0.963**、加权 κ **0.837**、κ 95% 自助区间 **[0.706, 0.918]**、
+  平均偏差 **0.00**；三通道 κ 分别约为 0.79 / 0.81 / 0.92。好照片条件完全一致率 **7/9≈0.78**，
+  而 3 对恶劣照片（逆光/昏暗远距/重遮挡）**完全一致率 0**。
+- **闸门与跨区排名**：阈值（配对≥12、加权一致率≥0.85、κ≥0.60、κ 区间下界≥0.40、|偏差|≤0.5）全部满足 →
+  `GET /api/reliability/ranking?fieldId=std.li_iso_level` 返回排名 **BING(3.50) > YI(2.63) > JIA(2.00)**。
+- **一致性不足即禁止排名**：`std.li_photo_grade`（照片快评）虽已登记入目录，但 κ≈**0.128**、区间跨 0、加权一致率 0.79，
+  闸门 `NOT_ELIGIBLE`；同一 ranking 接口对它返回 **HTTP 409** 且不产出任何名次。
+- **分层测量模型** `y=μ+场所+检查员+ε`：标准字段可估计，方差份额约为 **场所 81.8% / 检查员 3.8% / 残差 14.5%**；
+  照片快评因无场所/同场所复检，返回 `estimable=false` 与具体补足缺口（体现“泛化好但需足够复检”）。
+- **锚样校准器**：12 个固定锚样 = **8 永久设施 + 4 临时施工**，严格分两类统计；检查员韩涛（INS-HAN）
+  对全部锚样系统性低判一级，平均偏差 **−0.75** 被标记。覆盖分析显示 6 个新兴场景（户外预制舱、热失控后复勘、
+  梯次利用等）未覆盖、**新兴场景覆盖率 0**，并给出“固定锚样解释强但新场景覆盖有限”的说明。
+  `POST /anchors/calibration/evaluate {"poolAcrossClasses":true}` 或同时传两类 → **422**
+  （临时施工照片不得与永久设施合并为同类锚样）。
+- **培训反馈台**：`POST /feedback/generate` 依据锚样偏差与配对分歧生成 INS-HAN / INS-ZHAO 等条目，
+  可 `OPEN→ACKED→DONE`；审计员调用生成接口被拒（权限不足）。
+
+**干净复现（推荐）**：
+
+```bash
+# 1) 重建数据库（容器自带 PostgreSQL 18，ccdev/ccdev）
+PGPASSWORD=ccdev /opt/postgresql-18/bin/psql -h127.0.0.1 -Uccdev -dccdev \
+  -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+# 2) 启动后端（自动建表并依次播种 data.sql + reliability-data.sql）
+cd backend && mvn spring-boot:run
+# 3) 另一个终端：完整 E2E
+python3 backend/e2e/run-e2e.py        # 期望 86 PASS / 0 FAIL
+```
 
 > 说明：本隔离容器未安装 Docker 守护进程，镜像未在本地构建；已提供多阶段 `Dockerfile` 与 `docker-compose.yml`（YAML 结构已校验），在装有 Docker 的环境执行 `docker compose up --build` 即可。上述单测、前端构建与 37 项 E2E 均在容器预装的 JDK 25 / Node 22 / PostgreSQL 18 上实际执行通过。
 
@@ -91,6 +134,7 @@ E2E 断言结果（最近一次执行）：**37 项全部 PASS，0 FAIL**（`bac
 | 字段目录 | 按版本 + asOf 解释字段；显示值域/单位/粒度/事件时间含义/辖区/敏感级/有效区间/弃用替代；字段版本史 |
 | 映射契约 | 契约状态与生效区间、逐值证据、换算公式、equivalent=false 的拒绝项 |
 | 表单与证据链 | 不可变实例、提交时目录版本、逐字段映射轨迹、案件事件流、map-check 显式拒绝演示 |
+| 隔离等级一致性 | 总览/闸门/跨区排名、加权一致率·κ·自助区间·等级差分布、复检配对账（可新增）、观察条件编码、锚样校准器（永久/临施分类、检查员偏差、覆盖）、分层场所/检查员效应、培训反馈台 |
 | 离线草案 | IndexedDB 本地草案、WebWorker 同步、语义/敏感级冲突待决、退回重填/管理员强合 |
 | 历史复现 | 查询历史、按快照重放、存档 vs 复现逐组比对 |
 | 新字段治理 | 两条路线（市级标准 / 命名空间扩展）申请、批准（可追溯）/驳回、批准前拒绝→批准后回溯闭环 |
@@ -105,6 +149,11 @@ E2E 断言结果（最近一次执行）：**37 项全部 PASS，0 FAIL**（`bac
 - 离线冲突检测：前端 `sync.worker.ts` 预检 + 后端 `OfflineService` 独立复核；
 - 历史复现：`query_history.version_snapshot` + `HistoryService.replay` 固定版本重编译；
 - 回溯不改写旧表单：治理批准只发布新目录版本/契约生效日，表单实例行永不更新。
+- 复检配对账与等级差：`iso_pair(obs_a,obs_b,pair_type)` 显式配对，差值得自两侧 `iso_observation.level_value`；
+- 加权一致率 / 加权 κ / 系统偏差 / 固定种子自助区间：`reliability.AgreementStats`（纯函数 + JUnit）；
+- 场所 vs 检查员效应：`reliability.HierarchicalModel` 中心化反投影加法模型 + 复检充分性门槛，不足即 `estimable=false`；
+- 锚样分类铁律：`iso_anchor_sample.anchor_class ∈ {PERMANENT,TEMP_CONSTRUCTION}`，跨类合并在 `ReliabilityService.evaluateAnchorClass` 直接 422；
+- 一致性闸门：`ReliabilityGate` 出结论，`GET /api/reliability/ranking` 在不达标时抛 `ReliabilityGateException` → HTTP 409 且不返回名次（字段仍在 `field_def` 可登记）。
 
 ## 8. 目录结构
 
@@ -118,10 +167,11 @@ E2E 断言结果（最近一次执行）：**37 项全部 PASS，0 FAIL**（`bac
 │   │   ├── policy/         访问策略、披露抑制
 │   │   ├── offline/        离线草案合并与待决
 │   │   ├── governance/     扩展字段两条路线治理
+│   │   ├── reliability/    锂电隔离一致性：AgreementStats/Kappa/自助区间、HierarchicalModel、ReliabilityGate、ReliabilityService
 │   │   ├── form/ web/ security/ db/
-│   ├── src/main/resources/ schema.sql / data.sql / application.yml
-│   └── e2e/run-e2e.py      端到端验证脚本
+│   ├── src/main/resources/ schema.sql / data.sql / reliability-data.sql / application.yml
+│   └── e2e/run-e2e.py      端到端验证脚本（8 场景 86 断言）
 ├── frontend/               React + TS 工程
-│   └── src/{pages,workers,db.ts,api.ts}
+│   └── src/{pages/reliability/*, pages/ReliabilityPage.tsx, workers,db.ts,api.ts}
 └── docker-compose.yml      一键启动（postgres + backend + frontend/nginx）
 ```

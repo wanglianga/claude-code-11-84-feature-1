@@ -12,7 +12,9 @@ spring:
     init:
       mode: always
       schema-locations: classpath:schema.sql
-      data-locations: classpath:data.sql
+      data-locations:
+        - classpath:data.sql
+        - classpath:reliability-data.sql
   jackson:
     default-property-inclusion: non_null
     time-zone: Asia/Shanghai
@@ -22,3 +24,18 @@ app:
     threshold: 4          # 最小发布组：原始计数 < 4 的分组抑制
   demo:
     admin-token: ${ADMIN_TOKEN:fire-admin-token}
+  reliability:
+    # 跨区排名一致性闸门阈值
+    gate:
+      min-pairs: 12
+      min-weighted-agreement: 0.85
+      min-kappa: 0.60
+      min-kappa-ci-lower: 0.40
+      max-abs-bias: 0.50
+    # 分层测量模型最低复检/交叉要求（不足则不输出效应分解）
+    hierarchical:
+      min-observations: 16
+      min-sites: 5
+      min-inspectors: 3
+      min-revisit-pairs: 6
+      min-inspector-site-coverage: 2

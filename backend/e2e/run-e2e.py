@@ -173,5 +173,112 @@ check("演进后 JIA 计数仍=4", group(r2, "JIA")["count"], 4)
 check("演进后可发布总数仍=9", r2["disclosure"]["total"], 9)
 check("演进后 YI 仍被抑制", group(r2, "YI")["suppressed"], True)
 
+print("=== 场景8：锂电隔离等级 —— 复检配对/一致性/闸门排名/分层模型/锚样/培训 ===")
+ISO = "std.li_iso_level"
+PHOTO = "std.li_photo_grade"
+
+# 8.0 认证：未登录访问可靠性接口被 401 拦截
+code, _ = call("GET", "/api/reliability/meta")
+check("可靠性接口未带令牌返回 401", code, 401)
+
+# 8.1 字段已登记进入字段目录（即使一致性不足也“可登记”）
+_, fields = call("GET", "/api/catalog/fields", CITY)
+check("锂电隔离等级字段已登记入目录", any(f.get("fieldId") == ISO for f in fields), True)
+check("照片快评字段也已登记（待闸门约束）", any(f.get("fieldId") == PHOTO for f in fields), True)
+
+# 8.2 配对账与观察记录
+_, meta = call("GET", "/api/reliability/meta", CITY)
+check("元数据含 2 个受评字段", len(meta["fields"]), 2)
+_, obs = call("GET", f"/api/reliability/observations?fieldId={ISO}", CITY)
+check("标准等级观察记录=48 条", len(obs), 48)
+_, pairs = call("GET", f"/api/reliability/pairs?fieldId={ISO}", CITY)
+check("标准等级配对账=36 对", len(pairs), 36)
+check("配对账计算了有符号等级差", all("signed_diff" in p for p in pairs), True)
+_, fpairs = call("GET", f"/api/reliability/pairs?fieldId={PHOTO}", CITY)
+check("照片快评盲审配对=18 对", len(fpairs), 18)
+
+# 8.3 一致性估计：高一致字段通过闸门，照片快评被拦截
+_, ci = call("GET", f"/api/reliability/consistency?fieldId={ISO}", CITY)
+o = ci["overall"]
+check("标准等级总体 n=36", o["n"], 36)
+check("标准等级二次加权 κ≥0.7", o["kappaQuadratic"] >= 0.7, True)
+check("标准等级 κ 区间下界>0.4", o["kappaQuadraticCi95"]["lower"] > 0.4, True)
+check("标准等级无显著系统偏差", abs(o["meanSignedDiff"]) < 0.05, True)
+check("标准等级闸门通过可排名", ci["gate"]["rankingEligible"], True)
+check("三类比对通道齐全", sorted(ci["byType"].keys()),
+      ["BLIND_PHOTO", "ONSITE_VS_MEASURE", "SAME_SITE_REVISIT"])
+check("好照片条件完全一致率高于恶劣条件",
+      ci["byPhotoQuality"]["GOOD"]["exactAgreement"] > ci["byPhotoQuality"]["ADVERSE"]["exactAgreement"], True)
+check("恶劣照片条件完全一致率=0（种子构造）",
+      ci["byPhotoQuality"]["ADVERSE"]["exactAgreement"], 0.0)
+
+_, cip = call("GET", f"/api/reliability/consistency?fieldId={PHOTO}", CITY)
+check("照片快评 κ<0.4（机会校正后一致性弱）", cip["overall"]["kappaQuadratic"] < 0.4, True)
+check("照片快评闸门不通过", cip["gate"]["rankingEligible"], False)
+check("照片快评状态=NOT_ELIGIBLE", cip["gate"]["status"], "NOT_ELIGIBLE")
+
+# 8.4 跨区排名受闸门保护
+code, rk = call("GET", f"/api/reliability/ranking?fieldId={ISO}", CITY)
+check("高一致字段排名接口 200", code, 200)
+check("跨区排名第一为 BING", rk["ranking"][0]["district"], "BING")
+check("排名返回 JIA/YI/BING 三组", sorted(r["district"] for r in rk["ranking"]), ["BING", "JIA", "YI"])
+code, rb = call("GET", f"/api/reliability/ranking?fieldId={PHOTO}", CITY)
+check("低一致字段排名返回 409", code, 409)
+check("409 响应明确 rankingEligible=false", rb.get("rankingEligible"), False)
+check_contains("409 体携带闸门结论与‘不得驱动跨区排名’", rb, "不得驱动跨区排名")
+
+# 8.5 分层模型：标准字段可估计且场所效应占主导；照片快评复检不足不可估计
+_, hm = call("GET", f"/api/reliability/hierarchical?fieldId={ISO}", CITY)
+check("分层模型对标准字段可估计", hm["estimable"], True)
+check("场所效应方差份额>检查员效应", hm["shareSite"] > hm["shareInspector"], True)
+check("方差份额之和≈1", abs(hm["shareSite"] + hm["shareInspector"] + hm["shareResidual"] - 1.0) < 1e-6, True)
+check("场所效应列表=12", len(hm["siteEffects"]), 12)
+_, hmp = call("GET", f"/api/reliability/hierarchical?fieldId={PHOTO}", CITY)
+check("照片快评缺场所/复检，分层模型拒绝估计", hmp["estimable"], False)
+check("不可估计时给出具体缺口", len(hmp["missingRequirements"]) > 0, True)
+
+# 8.6 锚样校准：永久/临时严格分类，禁止合并；系统性偏松检查员被标记
+_, anchors = call("GET", "/api/reliability/anchors", CITY)
+check("固定锚样=12 个（8 永久 + 4 临时施工）", len(anchors), 12)
+_, cal = call("GET", "/api/reliability/anchors/calibration", CITY)
+check("校准按 PERMANENT/TEMP_CONSTRUCTION 两类输出",
+      sorted(cal["perClass"].keys()), ["PERMANENT", "TEMP_CONSTRUCTION"])
+check("规则显式禁止跨类合并", cal["rule"]["poolingAllowed"], False)
+han = next(x for x in cal["perInspector"] if x["inspector_code"] == "INS-HAN")
+check("韩涛锚样平均偏差≈-0.75（系统性偏松）", abs(han["meanSignedBias"] + 0.75) < 1e-6, True)
+check("偏松检查员被标记需校准/培训", han["flagged"], True)
+check("覆盖分析列出≥5 个未覆盖新兴场景", len(cal["coverage"]["uncoveredNovelScenarios"]) >= 5, True)
+check("新兴场景覆盖率=0（固定锚样新场景覆盖有限）", cal["coverage"]["novelCoverageRate"], 0.0)
+code, mix = call("POST", "/api/reliability/anchors/calibration/evaluate", CITY, {"poolAcrossClasses": True})
+check("请求合并永久+临时锚样返回 422", code, 422)
+check_contains("合并请求被拒并说明禁止同类", mix, "禁止把临时施工锚样与永久设施锚样合并")
+code, ep = call("POST", "/api/reliability/anchors/calibration/evaluate", CITY, {"anchorClass": "PERMANENT"})
+check("永久类单评 n=48（8 锚样×6 检查员）", ep["result"]["n"], 48)
+code, et = call("POST", "/api/reliability/anchors/calibration/evaluate", CITY, {"anchorClass": "TEMP_CONSTRUCTION"})
+check("临时施工类单评 n=24（4 锚样×6 检查员）", et["result"]["n"], 24)
+
+# 8.7 培训反馈台：生成、权限、状态流转
+_, fb = call("POST", "/api/reliability/feedback/generate", CITY)
+check("生成的反馈包含偏松检查员 INS-HAN", any(x["inspector_code"] == "INS-HAN" for x in fb), True)
+hanfb = next(x["feedback_id"] for x in fb if x["inspector_code"] == "INS-HAN")
+code, fa = call("POST", "/api/reliability/feedback/generate", AUD, {})
+check("审计员无 GOVERN/写权限生成反馈被拒", code != 200 and "权限" in json.dumps(fa, ensure_ascii=False), True)
+code, st = call("POST", f"/api/reliability/feedback/{hanfb}/status", CITY, {"status": "ACKED"})
+check("反馈可 OPEN→ACKED", st["status"], "ACKED")
+code, st2 = call("POST", f"/api/reliability/feedback/{hanfb}/status", CITY, {"status": "DONE"})
+check("反馈可 ACKED→DONE", st2["status"], "DONE")
+
+# 8.8 配对账写入与校验（固定 ID，幂等）
+code, np1 = call("POST", "/api/reliability/pairs", CITY,
+                 {"pairId": "P-E2E-REL-1", "fieldId": ISO, "pairType": "SAME_SITE_REVISIT",
+                  "obsA": "O-S-J01-ON", "obsB": "O-S-J01-RV"})
+check("新配对登记 200 且等级差=0", code == 200 and np1["signedDiff"] == 0, True)
+code, np2 = call("POST", "/api/reliability/pairs", CITY,
+                 {"pairId": "P-E2E-REL-1", "fieldId": ISO, "pairType": "SAME_SITE_REVISIT",
+                  "obsA": "O-S-J01-ON", "obsB": "O-S-J01-RV"})
+check("固定配对 ID 重复提交幂等", code, 200)
+code, badp = call("POST", "/api/reliability/pairs", CITY, {"obsA": "O-S-J01-ON"})
+check("缺少 obsB 的配对请求返回 422", code, 422)
+
 print(f"\n============ 汇总: PASS={PASS} FAIL={FAIL} ============")
 sys.exit(1 if FAIL else 0)
